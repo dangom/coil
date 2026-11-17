@@ -1492,11 +1492,10 @@ k kills it; g looks again."
   (or (cl-find (tabulated-list-get-id) (coil--known-kernels) :key #'cadr :test #'equal)
       (user-error "No session here")))
 
-(defun coil-sessions-attach ()
-  "Attach to the kernel at point, starting it if it is not running, and show it."
-  (interactive)
-  (pcase-let* ((`(,root ,state ,_pid) (coil--sessions-entry))
-               (session (gethash root coil--sessions)))
+(defun coil-attach (root)
+  "Attach to ROOT's kernel, starting it if it is not running; return its buffer."
+  (let* ((state (coil--state-dir root))
+         (session (gethash root coil--sessions)))
     (unless (coil--live-p session)
       (let* ((file (expand-file-name "bridge.eld" state))
              (saved (and (file-readable-p file)
@@ -1511,7 +1510,12 @@ k kills it; g looks again."
         (setq session (coil--start root (append (list :interpreter (lambda () interpreter))
                                                 backend)
                                    session))))
-    (pop-to-buffer (coil--buffer session))))
+    (coil--buffer session)))
+
+(defun coil-sessions-attach ()
+  "Attach to the kernel at point, starting it if it is not running, and show it."
+  (interactive)
+  (pop-to-buffer (coil-attach (car (coil--sessions-entry)))))
 
 (defun coil-sessions-detach ()
   "Detach from the kernel at point; it runs on."
@@ -1521,21 +1525,37 @@ k kills it; g looks again."
     (with-current-buffer (coil--buffer session) (coil-detach))
     (revert-buffer)))
 
-(defun coil-sessions-kill ()
-  "Kill the kernel at point."
-  (interactive)
-  (let* ((state (tabulated-list-get-id))
-         (entry (cl-find state (coil--known-kernels) :key #'cadr :test #'equal))
-         (pid (nth 2 entry)))
-    (when (and pid (coil--pid-alive-p pid)
-               (y-or-n-p (format "Kill the kernel of %s? " (abbreviate-file-name (car entry)))))
-      (when-let* ((session (gethash (car entry) coil--sessions))
+(defun coil-kill (root)
+  "Kill ROOT's kernel, if it runs: its state is lost; the log is kept."
+  (pcase-let ((`(,_ ,state ,pid) (or (assoc root (coil--known-kernels))
+                                     (user-error "No kernel for %s" root))))
+    (when (and pid (coil--pid-alive-p pid))
+      (when-let* ((session (gethash root coil--sessions))
                   ((coil--live-p session)))
         (setf (coil-session-status session) "shut down")
         (delete-process (coil-session-process session)))
       (signal-process pid 'term)
       (dolist (name (directory-files state t "\\`\\(kernel\\.json\\|kernel\\.pid\\|k-[0-9]+\\)\\'"))
-        (delete-file name))
+        (delete-file name)))))
+
+(defun coil-kernels ()
+  "The kernels running, as plists: :root :pid :memory (bytes) :up (seconds)
+:attached (whether this Emacs is)."
+  (cl-loop for (root _state pid) in (coil--known-kernels)
+           for attributes = (and pid (coil--pid-alive-p pid) (process-attributes pid))
+           when attributes
+           collect (list :root root :pid pid
+                         :memory (* 1024 (or (alist-get 'rss attributes) 0))
+                         :up (float-time (or (alist-get 'etime attributes) 0))
+                         :attached (coil--live-p (gethash root coil--sessions)))))
+
+(defun coil-sessions-kill ()
+  "Kill the kernel at point."
+  (interactive)
+  (pcase-let ((`(,root ,_ ,pid) (coil--sessions-entry)))
+    (when (and pid (coil--pid-alive-p pid)
+               (y-or-n-p (format "Kill the kernel of %s? " (abbreviate-file-name root))))
+      (coil-kill root)
       (revert-buffer))))
 
 (define-key coil-sessions-mode-map "k" #'coil-sessions-kill)
