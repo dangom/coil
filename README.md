@@ -423,6 +423,13 @@ Tested by hand, on a pixi project with IPython 9 and ipykernel 7:
   - restart and shutdown;
   - **closing Emacs and reattaching to the same kernel**, with the history
     rebuilt from the log.
+- completion in a `.py` buffer, merged with eglot's on ty: the live
+  session's candidates added (a data frame's columns, a dictionary's keys)
+  and the latency measured against eglot alone;
+- the idle watch: an idle kernel shut down attached and detached, a run
+  longer than the limit left alone, and the next session told why;
+- the conda-forge lookup in the background: offers asked one at a time, a
+  misspelt name warned of and not offered from conda-forge;
 - pinning to a canvacs canvas through the Doom config's
   `coil-pin-function`, and a re-run rewriting the pinned figure.
 
@@ -430,9 +437,25 @@ Tested by hand, on a pixi project with IPython 9 and ipykernel 7:
 
 - **A code action for ty's diagnostic.** There is the command
   `coil-python-add-missing-imports` instead.
-- **Tests in the repository.** The checks above were run by hand.
 
-### Open questions
 
-- **Idle kernels.** Shut down after a time, or never automatically?
-  (Today: never; `coil-list-sessions` shows them.)
+## Testing
+
+```sh
+make test-elisp                         # the Emacs side, kernel stubbed: needs only Emacs
+make test-bridge PYTHON=env/bin/python  # the bridge with a real kernel: a Python with ipykernel
+make compile                            # byte-compiles, warnings as errors
+```
+
+`test/coil-test.el` covers completion merged with another source (order,
+metadata, exit functions, a late kernel answer, dictionary keys), the
+idle-shutdown note, and the queue of missing-package offers.
+`test/test_bridge.py` runs a real kernel: completion of live objects, and
+the idle watch with a limit of 8 s (`COIL_TEST_IDLE`), attached, detached,
+during a run longer than the limit, and turned off. It takes about a minute,
+and is skipped where ipykernel is not installed.
+
+
+## License
+
+GPL-3.0-or-later. See `LICENSE`.
