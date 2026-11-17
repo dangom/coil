@@ -605,10 +605,14 @@ starts an indented line when it is not.  Above, the cells:
            (let ((beg (point)))
              ,@body
              (coil--claim beg (point) ,cell)))
+         ;; The prompt stays in view, the window scrolling no more than
+         ;; that takes: nothing moves while it is in view.
          (dolist (window follow)
-           (with-selected-window window
-             (goto-char (point-max))
-             (recenter -1)))))))
+           (set-window-point window (point-max))
+           (unless (pos-visible-in-window-p (point-max) window)
+             (with-selected-window window
+               (goto-char (point-max))
+               (recenter -1))))))))
 
 (defun coil--ansi (beg end)
   "Colour BEG..END from its SGR sequences, and drop the other CSI ones.
