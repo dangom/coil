@@ -31,7 +31,8 @@ Requests (Emacs -> bridge), each with an integer "id":
   {"op": "interrupt"}
   {"op": "shutdown"}                  stops the kernel, then this
 
-Events (bridge -> Emacs): "ready", "missing", "fatal", "status", "input"
+Events (bridge -> Emacs): "ready" (with "ended" if the idle watch shut the
+last kernel down), "missing", "fatal", "status", "input"
 (execution count), "stream", "display", "result", "error", "clear",
 "input_request", "done", "reply", "died", "shutdown"; and "codefile", the
 name of the file the kernel runs code as (pdb shows it).
@@ -174,7 +175,7 @@ def create_subshell(client, features):
 
 def clear(state):
     for name in os.listdir(state):
-        if name in ("kernel.json", "kernel.pid") or name.startswith("k-"):
+        if name in ("kernel.json", "kernel.pid", "activity") or name.startswith("k-"):
             try:
                 os.remove(os.path.join(state, name))
             except OSError:
@@ -210,6 +211,146 @@ def start(state, cwd, argv_template):
              + os.path.join(state, "kernel.log"))
         sys.exit(5)
     return client, process.pid, process
+
+
+# --- The idle watch ---------------------------------------------------------
+#
+# A kernel outlives Emacs, so what ends an idle one cannot be in Emacs, nor
+# in this bridge, which goes with it.  It is a process of its own, started
+# beside the kernel, detached as the kernel is: this file run with --watch.
+# It listens to the kernel's iopub, where every client's runs are announced,
+# and keeps the time the last one began or ended as the mtime of the file
+# "activity".  Once that is older than the limit, and the kernel's main shell
+# answers (so it is not in a run, say one longer than the limit), it shuts
+# the kernel down.  It ends with the kernel, however that ends.
+
+
+def watching(state):
+    """(watch pid, kernel pid) from watch.pid, or (None, None)."""
+    try:
+        with open(os.path.join(state, "watch.pid")) as f:
+            watcher, kernel = (int(n) for n in f.read().split())
+        return watcher, kernel
+    except (OSError, ValueError):
+        return None, None
+
+
+def pop_ended(state):
+    """What the watch left of a kernel it shut down, {"idle", "at"}; once."""
+    path = os.path.join(state, "ended")
+    try:
+        with open(path) as f:
+            ended = json.load(f)
+        os.remove(path)
+        return ended
+    except (OSError, ValueError):
+        return None
+
+
+def ensure_watch(state, pid, idle):
+    """Start the idle watch of kernel PID, unless one is watching it."""
+    if not idle:
+        return
+    watcher, kernel = watching(state)
+    if kernel == pid and pid_alive(watcher):
+        return
+    with open(os.path.join(state, "kernel.log"), "ab", buffering=0) as log:
+        subprocess.Popen(
+            [sys.executable, "-I", os.path.abspath(__file__), "--watch",
+             "--state", state, "--idle", str(idle)],
+            stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+            start_new_session=True)
+
+
+def answers(client, timeout=2):
+    """Whether the kernel's main shell answers at once: it is not in a run.
+    An answer that comes later, at the end of a run it waited behind, is no."""
+    msg_id = client.kernel_info()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            reply = client.get_shell_msg(timeout=0.2)
+        except queue.Empty:
+            continue
+        if reply["parent_header"].get("msg_id") == msg_id:
+            return True
+    return False
+
+
+def watch(state, idle):
+    pid = read_pid(state)
+    connection_file = os.path.join(state, "kernel.json")
+    if not (pid and pid_alive(pid) and os.path.exists(connection_file)):
+        return
+    os.umask(0o077)
+    with open(os.path.join(state, "watch.pid"), "w") as f:
+        f.write(f"{os.getpid()} {pid}")
+    client = BlockingKernelClient()
+    client.load_connection_file(connection_file)
+    client.start_channels(hb=False)
+    activity = os.path.join(state, "activity")
+
+    def touch():
+        if read_pid(state) == pid:  # not after the kernel is gone
+            with open(activity, "a"):
+                os.utime(activity)
+
+    def since():
+        try:
+            return time.time() - os.path.getmtime(activity)
+        except OSError:
+            touch()
+            return 0.0
+
+    def runs(msg):
+        return (msg["msg_type"] == "status"
+                and msg["parent_header"].get("msg_type") == "execute_request")
+
+    since()
+    while pid_alive(pid) and read_pid(state) == pid:
+        try:
+            msg = client.get_iopub_msg(timeout=min(60, idle))
+        except queue.Empty:
+            msg = None
+        if msg and runs(msg):
+            touch()
+        if since() <= idle:
+            continue
+        busy = not answers(client)
+        # What was announced while it was asked counts too.
+        while client.iopub_channel.msg_ready():
+            if runs(client.get_iopub_msg(timeout=0)):
+                busy = True
+        if busy:
+            touch()  # in a run, maybe one begun before the watch: not idle
+        else:
+            print(f"coil: the kernel ran nothing for {idle / 3600:g} h: shut down",
+                  flush=True)
+            # First, so that a bridge attached finds it when the kernel goes.
+            with open(os.path.join(state, "ended"), "w") as f:
+                json.dump({"idle": idle, "at": time.time()}, f)
+            try:
+                client.shutdown()
+            except Exception:
+                pass
+            for _ in range(50):
+                if not pid_alive(pid):
+                    break
+                time.sleep(0.1)
+            else:
+                os.kill(pid, signal.SIGKILL)
+            if read_pid(state) == pid:
+                clear(state)
+            break
+    client.stop_channels()
+    # Its files go with it, unless a new kernel's watch has taken over.
+    if read_pid(state) in (None, pid):
+        for name in ("activity", "watch.pid"):
+            if name == "activity" or watching(state)[0] == os.getpid():
+                try:
+                    os.remove(os.path.join(state, name))
+                except OSError:
+                    pass
 
 
 # --- Serving Emacs ----------------------------------------------------------
@@ -400,22 +541,32 @@ class Bridge:
                 if self.process:
                     self.process.poll()
                 if not pid_alive(self.pid):
-                    emit("died")
+                    emit("died", ended=pop_ended(self.state))
                     return
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--state", required=True)
-    parser.add_argument("--cwd", required=True)
-    parser.add_argument("--kernel", required=True,
+    parser.add_argument("--cwd")
+    parser.add_argument("--kernel",
                         help="the kernel's command, a JSON list; {connection_file} "
                         "and {python} are filled in")
     parser.add_argument("--attach-only", action="store_true")
+    parser.add_argument("--idle", type=float, default=0,
+                        help="shut the kernel down after this many seconds "
+                        "with nothing run; 0, never")
+    parser.add_argument("--watch", action="store_true",
+                        help="be the idle watch of the kernel in --state")
     args = parser.parse_args()
 
     state = os.path.abspath(args.state)
     check_state(state)
+    if args.watch:
+        watch(state, args.idle)
+        return
+    if args.cwd is None or args.kernel is None:
+        parser.error("--cwd and --kernel are needed, but with --watch")
     connection_file = os.path.join(state, "kernel.json")
     pid = read_pid(state)
     client = None
@@ -423,6 +574,7 @@ def main():
         client = connect(connection_file, timeout=5)
     process = None
     fresh = client is None
+    ended = pop_ended(state)
     if fresh:
         if args.attach_only:
             emit("fatal", message="no kernel running")
@@ -441,13 +593,15 @@ def main():
             content = reply["content"]
             break
     subshell = create_subshell(client, content.get("supported_features", []))
+    ensure_watch(state, pid, args.idle)
     language = content.get("language_info", {})
     emit("ready", fresh=fresh, pid=pid,
          language=language.get("name"), version=language.get("version"),
          implementation=content.get("implementation"),
          implementation_version=content.get("implementation_version"),
          environment=sys.prefix,
-         banner=content.get("banner", ""), subshell=bool(subshell))
+         banner=content.get("banner", ""), subshell=bool(subshell),
+         ended=ended)
     Bridge(state, client, pid, process, subshell).serve()
 
 

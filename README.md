@@ -206,7 +206,7 @@ Limits:
     with envrc and direnv, the project's.
   - The kernel runs detached, in its own session and process group, so it
     outlives the bridge and Emacs.
-- **Bridge.** `bridge/coil_bridge.py`, about 400 lines on `jupyter_client`
+- **Bridge.** `bridge/coil_bridge.py`, about 600 lines on `jupyter_client`
   (which `ipykernel` brings).
   - Emacs runs it as a plain subprocess, with `python -I`, so nothing in the
     project directory can shadow its imports.
@@ -277,6 +277,17 @@ card whose source is the script, and a re-run rewrites the file.
   group, with nothing tying it to the bridge, so it lives on when the bridge
   or Emacs ends. Its connection file, pid and log stay in coil's state
   directory, and that is how a later Emacs finds it again.
+- **Ending when idle.** A kernel that has run nothing for
+  `coil-kernel-idle-hours` (48) is shut down; nil keeps it forever.
+  - Since a kernel outlives Emacs, this is kept by a small watch process
+    started beside it (`coil_bridge.py --watch`), detached as the kernel
+    is. It ends with the kernel.
+  - The watch listens to the kernel's broadcasts, where every client's runs
+    are announced. Before shutting down, it checks that the kernel answers
+    at once, so a run longer than the limit, or one begun before the watch,
+    is never cut short.
+  - The session says why the kernel went, if attached, and the next session
+    of the project does too. The log is kept; the variables are lost.
 - **History.**
   - Each cell is logged as it ends: its code, source, timing and outputs,
     with figures as PNG files.
@@ -337,6 +348,9 @@ Whoever can talk to a kernel can run code as you.
 - Connection files are 0600, in `$XDG_STATE_HOME/coil/<project hash>/`. They
   are outside the project, so they are never committed or synced with it.
 - The bridge listens on nothing; it is reached only through its pipe.
+- The idle watch listens on nothing either. It is a client of the kernel,
+  through the same connection file, and only reads the broadcasts, asks
+  `kernel_info`, and asks for shutdown.
 - **One exception, from ipykernel:** it always opens a port on `127.0.0.1`
   so that output from forked subprocesses reaches the session
   (`IOPubThread(pipe=True)`, hard-coded).

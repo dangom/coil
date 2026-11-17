@@ -57,6 +57,15 @@
 Only you can read it: it is made mode 0700, its files 0600."
   :type 'directory)
 
+(defcustom coil-kernel-idle-hours 48
+  "Hours a kernel may run nothing before it is shut down; nil, never.
+A kernel outlives Emacs, so this is kept by a watch beside the kernel, not
+by Emacs: it holds whether Emacs is open or not, with the value this had
+when the watch began, as the kernel started.  A run that lasts longer is
+not cut short; only a kernel that waits does.  Its variables are lost; its
+log is kept, and the session says why the kernel went."
+  :type '(choice number (const :tag "Never" nil)))
+
 (defcustom coil-log-cells 300
   "How many cells of the log are shown again when a session buffer is made."
   :type 'natnum)
@@ -308,7 +317,11 @@ session when the bridge finds jupyter_client missing.")
            :name (format "coil %s" (coil-session-name session))
            :command (list python "-I" coil-bridge
                           "--state" state "--cwd" root
-                          "--kernel" (json-serialize (vconcat (plist-get backend :kernel))))
+                          "--kernel" (json-serialize (vconcat (plist-get backend :kernel)))
+                          "--idle" (number-to-string
+                                    (if coil-kernel-idle-hours
+                                        (round (* 3600 coil-kernel-idle-hours))
+                                      0)))
            :connection-type 'pipe
            :coding 'utf-8-unix
            :noquery t
@@ -391,8 +404,11 @@ Before the kernel is ready, it waits in a queue."
        (message "coil: %s" (alist-get 'message event)))
       ("died"
        (unless (member (coil-session-status session) '("restarting" "shut down"))
-         (setf (coil-session-status session) "kernel died")
-         (coil--note session "The kernel died.  C-c C-z or any send starts a new one.")))
+         (let ((ended (alist-get 'ended event)))
+           (setf (coil-session-status session) (if ended "shut down" "kernel died"))
+           (coil--note session (concat (if ended (coil--ended-text "The kernel" ended)
+                                         "The kernel died.")
+                                       "  C-c C-z or any send starts a new one.")))))
       ("shutdown" (setf (coil-session-status session) "shut down"))
       ("reply"
        (remhash (alist-get 'id event) (coil-session-requests session))
@@ -411,10 +427,20 @@ Before the kernel is ready, it waits in a queue."
     (when (alist-get 'fresh event)
       (clrhash (coil-session-codefiles session))
       (coil--rotate-log session))
-    (coil--note session (coil--kernel-line event) coil--ready-at))
+    (coil--note session (concat (when-let* ((ended (alist-get 'ended event)))
+                                  (concat (coil--ended-text "The last kernel" ended) "\n"))
+                                (coil--kernel-line event))
+                coil--ready-at))
   (dolist (line (coil-session-queue session))
     (process-send-string (coil-session-process session) line))
   (setf (coil-session-queue session) nil))
+
+(defun coil--ended-text (kernel ended)
+  "That KERNEL was shut down idle, from ENDED, the bridge's account of it."
+  (format "%s ran nothing for %s h, and was shut down %s (`coil-kernel-idle-hours')."
+          kernel
+          (string-trim-right (format "%.1f" (/ (alist-get 'idle ended) 3600.0)) "\\.0")
+          (format-time-string "%a %e %b, %H:%M" (alist-get 'at ended))))
 
 (defun coil--kernel-line (event)
   "What the kernel of the ready EVENT is: language, shell, environment, pid."
