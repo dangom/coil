@@ -93,7 +93,7 @@ On a cell (the output is read-only, so plain letters are free):
 | `o` | opens its figure at full size |
 | `c` | pins its figure, as `coil-pin-function` does |
 | `P` | every figure |
-| `TAB` | unfolds long output |
+| `TAB` | unfolds long code or output (or folds it again) |
 
 **Other commands:**
 - `coil-restart`;
@@ -103,6 +103,12 @@ On a cell (the output is read-only, so plain letters are free):
 - `coil-trust` and `coil-untrust`;
 - `coil-python-add-missing-imports`, which offers each import the language
   server cannot find.
+
+Each run ends with a hairline across the window. Its code sits on a faint
+tint (`coil-code`) and its output on the plain page, with the status at the
+right edge. Code of more than `coil-fold-input-lines` lines (12), as from a
+large paste, shows its first `coil-fold-input-shown` (6), then `… N more
+lines  TAB`. Output folds after `coil-fold-lines` (200).
 
 ### Debugging
 

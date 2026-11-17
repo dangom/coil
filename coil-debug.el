@@ -128,6 +128,12 @@ its own lines there; a real file is itself."
                   (goto-char (point-min))
                   (forward-line (1- (cdr place)))
                   (point)))))
+    ;; Stopped in folded code: unfold it.
+    (with-current-buffer buffer
+      (dolist (overlay (overlays-at pos))
+        (when (overlay-get overlay 'coil-fold)
+          (overlay-put overlay 'invisible nil)
+          (overlay-put overlay 'before-string nil))))
     (setq coil-debug--arrow (with-current-buffer buffer (copy-marker pos)))
     (unless (overlayp coil-debug--line)
       (setq coil-debug--line (make-overlay 1 1))

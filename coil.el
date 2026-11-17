@@ -53,6 +53,15 @@ A log holds what was run and what it printed: nil keeps none at all."
   "Output of a cell longer than this many lines is folded, TAB to unfold."
   :type 'natnum)
 
+(defcustom coil-fold-input-lines 12
+  "Code of a cell longer than this many lines is folded, TAB to unfold.
+Its first `coil-fold-input-shown' lines stay in view."
+  :type 'natnum)
+
+(defcustom coil-fold-input-shown 6
+  "How many lines of folded code stay in view."
+  :type 'natnum)
+
 (defcustom coil-image-max-width 900
   "The widest a figure is shown, in pixels, or nil for the window's width."
   :type '(choice natnum (const nil)))
@@ -105,8 +114,12 @@ session when the bridge finds jupyter_client missing.")
   "A cell that failed.")
 (defface coil-stderr '((t :inherit warning))
   "What a cell wrote to stderr.")
-(defface coil-code '((t :extend t :inherit hl-line))
-  "The code of a cell.")
+(defface coil-code '((((background light)) :extend t :background "gray96")
+                     (t :extend t :background "gray15"))
+  "The code of a cell: a faint tint, to tell it from its output.")
+(defface coil-rule '((((background light)) :underline (:color "gray85" :position t))
+                     (t :underline (:color "gray25" :position t)))
+  "The hairline under each cell, across the window.")
 
 
 ;;; State, trust
@@ -538,8 +551,11 @@ starts an indented line when it is not.  Above, the cells:
                  (_ "…")))
          (time (and (coil-cell-duration cell)
                     (format " %.2f s" (coil-cell-duration cell)))))
-    (concat (propertize (format "In [%s]%s" (or count "*") (or where "")) 'face 'coil-header)
-            "  " mark (if time (propertize time 'face 'coil-header) ""))))
+    ;; Where it came from on the left; how it went at the right edge.
+    (let ((right (concat mark (if time (propertize time 'face 'coil-header) ""))))
+      (concat (propertize (format "In [%s]%s" (or count "*") (or where "")) 'face 'coil-header)
+              (propertize " " 'display `(space :align-to (- right ,(1+ (string-width right)))))
+              right))))
 
 (defun coil--insert-cell (session cell)
   "Put CELL in SESSION's buffer, above the prompt."
@@ -552,9 +568,12 @@ starts an indented line when it is not.  Above, the cells:
           (insert (coil--header cell) "\n")
           (let ((code (point)))
             (insert (coil--fontify (string-trim-right (coil-cell-code cell)) mode) "\n")
-            (add-face-text-property code (point) 'coil-code t))
+            (add-face-text-property code (point) 'coil-code t)
+            (coil--fold-input code (point)))
           (let ((ostart (point)))
-            (insert "\n")
+            ;; The cell ends with a hairline across the window.
+            (insert (propertize " " 'display '(space :align-to (- right 1)) 'face 'coil-rule)
+                    "\n")
             (setf (coil-cell-beg cell) (copy-marker beg)
                   (coil-cell-ostart cell) (copy-marker ostart)
                   (coil-cell-out cell) (copy-marker ostart t)))
@@ -761,6 +780,27 @@ The faces go in `face': this buffer has no font-lock."
                                'keymap (define-keymap
                                          "<mouse-1>" (lambda () (interactive) (coil-show-cell cell))))))))
 
+(defun coil--make-fold (beg end label)
+  "Hide BEG..END, showing LABEL in its place; TAB shows it again."
+  (let ((overlay (make-overlay beg end)))
+    (overlay-put overlay 'invisible t)
+    (overlay-put overlay 'evaporate t)    ; gone with its text
+    (overlay-put overlay 'coil-fold label)
+    (overlay-put overlay 'before-string label)
+    overlay))
+
+(defun coil--fold-input (beg end)
+  "Fold the code from BEG to END (after its newline), if it is long."
+  (save-excursion
+    (goto-char beg)
+    (let ((lines (count-lines beg end)))
+      (when (and (> lines coil-fold-input-lines)
+                 (zerop (forward-line coil-fold-input-shown)))
+        (coil--make-fold (point) (1- end)
+                         (propertize (format "… %d more lines  TAB"
+                                             (- lines coil-fold-input-shown))
+                                     'face '(coil-header coil-code)))))))
+
 (defun coil--fold (cell)
   "Fold CELL's output after `coil-fold-lines' lines."
   (when-let* ((out (coil-cell-out cell))
@@ -770,24 +810,23 @@ The faces go in `face': this buffer has no font-lock."
         (goto-char (coil-cell-ostart cell))
         (when (and (zerop (forward-line coil-fold-lines))
                    (< (point) (1- out)))
-          (let ((overlay (make-overlay (point) (1- out)))
-                (lines (count-lines (point) (1- out))))
-            (overlay-put overlay 'invisible t)
-            (overlay-put overlay 'coil-fold t)
-            (overlay-put overlay 'before-string
-                         (propertize (format "[%d more lines: TAB to show]\n" lines)
-                                     'face 'coil-header))))))))
+          (coil--make-fold (point) (1- out)
+                           (propertize (format "… %d more lines  TAB\n"
+                                               (count-lines (point) (1- out)))
+                                       'face 'coil-header)))))))
 
 (defun coil-toggle-fold ()
-  "Show or fold again the long output of the cell at point."
+  "Show, or fold again, the long code or output of the cell at point."
   (interactive)
-  (let ((cell (get-text-property (point) 'coil-cell)))
-    (dolist (overlay (overlays-in (coil-cell-ostart cell) (coil-cell-out cell)))
-      (when (overlay-get overlay 'coil-fold)
-        (overlay-put overlay 'invisible (not (overlay-get overlay 'invisible)))
-        (overlay-put overlay 'before-string
-                     (and (overlay-get overlay 'invisible)
-                          (propertize "[folded: TAB to show]\n" 'face 'coil-header)))))))
+  (let* ((cell (or (get-text-property (point) 'coil-cell) (user-error "Not on a cell")))
+         (code-p (< (point) (coil-cell-ostart cell))))
+    (dolist (overlay (if code-p
+                         (overlays-in (coil-cell-beg cell) (coil-cell-ostart cell))
+                       (overlays-in (coil-cell-ostart cell) (coil-cell-out cell))))
+      (when-let* ((label (overlay-get overlay 'coil-fold)))
+        (let ((fold (not (overlay-get overlay 'invisible))))
+          (overlay-put overlay 'invisible fold)
+          (overlay-put overlay 'before-string (and fold label)))))))
 
 
 ;;; Running code
