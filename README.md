@@ -39,21 +39,21 @@ environment. The name is `coil-python-pixi-environment`.
 
 ### In a `.py` buffer
 
-These are python.el's own keys, so nothing changes under your fingers.
+These are python.el's keys, except `C-c C-c` and `C-c C-b`.
 
 | Key | Sends |
 |---|---|
 | `C-c C-z`, `C-c C-p` | nothing; goes to the session, starting it if need be |
-| `C-c C-c` | the buffer (with `C-u`, its `if __name__ == "__main__"` block too) |
+| `C-c C-c` | the top-level statement point is in: all of the function, class or block (decorators, `else`, `except` too), or the line; or the region |
+| `C-c C-b` | the buffer (with `C-u`, its `if __name__ == "__main__"` block too) |
 | `C-c C-r` | the region |
 | `C-c C-e` | the statement at point, or the region |
-| `C-c C-b` | the block at point (`for`, `if`, `with`…), header and all; outside one, the statement |
 | `C-c C-s` | a line read from the minibuffer |
 | `C-M-x` | the function or class at point, with its decorators |
 | `C-c C-n` | the `# %%` cell at point, then moves to the next |
 | `C-c C-l` | `%run` the file |
 | `C-c C-f`, `C-c C-d` | nothing; shows what the session knows of the name at point |
-| `C-c C-k` | nothing; interrupts |
+| `C-c C-k` | nothing; interrupts (with `C-u`, restarts the kernel) |
 
 With `coil-eldoc-in-source`, eldoc there also asks the live session (after
 the language server), for what only it knows: a data frame's columns, a
@@ -77,7 +77,7 @@ an indented line when it is not (the kernel decides, as IPython does).
 | `TAB` | completes, from the live session |
 | (eldoc) | the signature and summary of what is at point, from the live session: `pd.read_csv(filepath_or_buffer, *, sep, …) -> DataFrame  Read a comma-separated…` |
 | `M-p` / `M-n` | the input history, kept across restarts |
-| `C-c C-c`, `C-c C-k` | interrupt |
+| `C-c C-c`, `C-c C-k` | interrupt (with `C-u`, restart the kernel) |
 | `C-c C-n` / `C-c C-p` | the next / previous cell |
 | `C-c C-o` | every figure of the project, newest first |
 | `C-c C-q` | shuts the kernel down |

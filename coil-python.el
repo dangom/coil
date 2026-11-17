@@ -357,6 +357,64 @@ Outside any block, the statement at point."
         (coil-python--send beg end)
       (coil-python-send-statement))))
 
+(defconst coil-python--clause-regexp "\\(?:elif\\|else\\|except\\|finally\\)\\_>"
+  "A line that goes on a statement begun above it.")
+
+(defun coil-python--top-level-line-p ()
+  "Whether the line at point begins a statement at the top level."
+  (save-excursion
+    (beginning-of-line)
+    (and (looking-at-p "[^ \t\n#]")
+         (let ((ppss (syntax-ppss)))
+           (and (zerop (car ppss)) (not (nth 3 ppss)))))))
+
+(defun coil-python--top-level-bounds ()
+  "The top-level statement point is in: (START . END).
+A function or class with its decorators, a block with its `elif', `else',
+`except' and `finally'.  Between two, the one before; before any, the first."
+  (save-excursion
+    (beginning-of-line)
+    (while (and (not (coil-python--top-level-line-p)) (zerop (forward-line -1))))
+    (unless (coil-python--top-level-line-p)
+      (while (and (not (coil-python--top-level-line-p)) (zerop (forward-line 1)) (not (eobp)))))
+    (unless (coil-python--top-level-line-p)
+      (user-error "No code here"))
+    ;; Up from a clause to what it goes on, and to the decorators.
+    (while (and (looking-at-p coil-python--clause-regexp) (zerop (forward-line -1)))
+      (while (and (not (coil-python--top-level-line-p)) (zerop (forward-line -1)))))
+    ;; A decorator's arguments may take lines of their own.
+    (while (let ((above (save-excursion
+                          (and (zerop (forward-line -1))
+                               (progn (while (and (looking-at-p "[ \t]")
+                                                  (zerop (forward-line -1))))
+                                      (and (looking-at-p "@") (point)))))))
+             (and above (goto-char above))))
+    (let ((start (point))
+          (decorated (looking-at-p "@")))
+      ;; Down to the next statement that is not part of this one.
+      (forward-line 1)
+      (while (and (not (eobp))
+                  (or (not (coil-python--top-level-line-p))
+                      (looking-at-p coil-python--clause-regexp)
+                      decorated))
+        (when (coil-python--top-level-line-p)
+          (setq decorated (looking-at-p "@")))
+        (forward-line 1))
+      ;; Without the blank lines and comments that come before the next.
+      (forward-line -1)
+      (while (and (> (point) start) (looking-at-p "[ \t]*\\(?:#.*\\)?$"))
+        (forward-line -1))
+      (cons start (line-end-position)))))
+
+(defun coil-python-send-top-level ()
+  "Run the top-level statement point is in: all of the function, class or
+block (decorators, `else' and `except' too), or the line.  Or the region."
+  (interactive)
+  (if (use-region-p)
+      (coil-python-send-region (region-beginning) (region-end))
+    (pcase-let ((`(,start . ,end) (coil-python--top-level-bounds)))
+      (coil-python--send start end))))
+
 (defconst coil-python-cell-regexp "^[ \t]*#[ \t]*%%"
   "The line that begins a cell, as VS Code, Spyder and Positron have it.")
 
@@ -430,10 +488,10 @@ it all.  The breakpoints set (\\[coil-debug-toggle-breakpoint]) stop it too."
 (defvar-keymap coil-python-mode-map
   "C-c C-z" #'coil-python-switch
   "C-c C-p" #'coil-python-switch
-  "C-c C-c" #'coil-python-send-buffer
+  "C-c C-c" #'coil-python-send-top-level
   "C-c C-r" #'coil-python-send-region
   "C-c C-e" #'coil-python-send-statement
-  "C-c C-b" #'coil-python-send-block
+  "C-c C-b" #'coil-python-send-buffer
   "C-M-x"   #'coil-python-send-defun
   "C-c C-n" #'coil-python-send-cell
   "C-c C-l" #'coil-python-run-file

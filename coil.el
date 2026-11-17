@@ -854,10 +854,13 @@ The prompt becomes PROMPT; what is typed there next is the answer."
           (coil-cell-outputs cell))
     (coil--send session "input" :value value)))
 
-(defun coil-interrupt ()
-  "Interrupt what the kernel is running."
-  (interactive)
-  (coil--send (or (coil-current-session) (user-error "No session")) "interrupt"))
+(defun coil-interrupt (&optional restart)
+  "Interrupt what the kernel is running.
+With RESTART (\\[universal-argument]), restart the kernel instead, losing its state."
+  (interactive "P")
+  (if restart
+      (coil-restart)
+    (coil--send (or (coil-current-session) (user-error "No session")) "interrupt")))
 
 (defun coil-detach ()
   "Let go of the kernel, which runs on: C-c C-z, or any send, attaches again."
