@@ -237,23 +237,84 @@ brings it (and IPython), to the pixi project's dev environment."
         (cons known t)
       (cons (downcase (string-replace "_" "-" top)) nil))))
 
-(defun coil-python--on-conda-forge-p (package)
-  "Whether conda-forge has PACKAGE, by that exact name; nil if unsure."
-  (with-temp-buffer
-    (and (executable-find "pixi")
-         (zerop (call-process "pixi" nil t nil "search" "--channel" "conda-forge" package))
-         (progn (goto-char (point-min))
-                (re-search-forward (concat "^" (regexp-quote package) "\\b") nil t)))))
+(defvar coil-python--on-conda-forge (make-hash-table :test #'equal)
+  "Packages found on conda-forge this Emacs session: not looked up again.
+Only finding is kept; a miss (or no network) is looked up afresh.")
+
+(defun coil-python--conda-forge-lookup (package callback)
+  "Call CALLBACK with whether conda-forge has PACKAGE, by that exact name.
+In the background: `pixi search', a second or two when its index is cold.
+nil if unsure: no pixi, no answer within 15 seconds."
+  (cond
+   ((gethash package coil-python--on-conda-forge) (funcall callback t))
+   ((not (executable-find "pixi")) (funcall callback nil))
+   (t
+    (let* ((done nil)
+           (output (generate-new-buffer " *coil pixi search*"))
+           (errors (generate-new-buffer " *coil pixi search errors*"))
+           (finish (lambda (found)
+                     (unless done
+                       (setq done t)
+                       (when found (puthash package t coil-python--on-conda-forge))
+                       (funcall callback found))))
+           (process
+            (make-process
+             :name "coil pixi search" :buffer output :noquery t
+             :connection-type 'pipe :stderr errors
+             :command (list "pixi" "search" "--channel" "conda-forge" package)
+             :sentinel
+             (lambda (process _event)
+               (unless (process-live-p process)
+                 (let ((found (and (eq (process-status process) 'exit)
+                                   (zerop (process-exit-status process))
+                                   (with-current-buffer output
+                                     (goto-char (point-min))
+                                     (re-search-forward
+                                      (concat "^" (regexp-quote package) "\\b") nil t))
+                                   t)))
+                   (kill-buffer output)
+                   (kill-buffer errors)
+                   (funcall finish found)))))))
+      (run-at-time 15 nil (lambda ()
+                            (when (process-live-p process)
+                              (delete-process process))))))))
+
+(defvar coil-python--offers nil
+  "Offers whose lookup is done, waiting for the minibuffer: one at a time.")
+
+(defvar coil-python--offering nil
+  "Whether an offer is being asked now.")
+
+(defun coil-python--next-offer ()
+  "Ask the next offer waiting, unless one is being asked."
+  (when (and coil-python--offers (not coil-python--offering))
+    (let ((offer (pop coil-python--offers)))
+      (setq coil-python--offering t)
+      (unwind-protect (apply #'coil-python--ask-package offer)
+        (setq coil-python--offering nil)
+        (when coil-python--offers
+          (run-at-time 0 nil #'coil-python--next-offer))))))
 
 (defun coil-python-offer-package (module root &optional then)
-  "Offer to add the package for MODULE to the pixi project ROOT; THEN after."
+  "Offer to add the package for MODULE to the pixi project ROOT; THEN after.
+The package is looked up on conda-forge first, in the background; the
+question comes when the answer is in, after any asked before it."
+  (let ((package (car (coil-python--package module))))
+    (message "coil: looking for %s on conda-forge..." package)
+    (coil-python--conda-forge-lookup
+     package
+     (lambda (found)
+       (setq coil-python--offers
+             (append coil-python--offers (list (list module root found then))))
+       (run-at-time 0 nil #'coil-python--next-offer)))))
+
+(defun coil-python--ask-package (module root found then)
+  "Ask whether to add MODULE's package to ROOT; FOUND, on conda-forge."
   (let* ((guess (coil-python--package module))
          (package (car guess))
          (known (cdr guess))
-         (found (progn (message "coil: looking for %s on conda-forge..." package)
-                       (coil-python--on-conda-forge-p package)))
          (warning (cond ((not found)
-                         (format "  %s is not on conda-forge.  Check the name: a misspelt or planted import can install a hostile package."
+                         (format "  %s was not found on conda-forge.  Check the name: a misspelt or planted import can install a hostile package."
                                  package))
                         ((not known)
                          (format "  (%s is a guess from the import name.)" package))))

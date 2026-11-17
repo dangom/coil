@@ -307,6 +307,11 @@ card whose source is the script, and a re-run rewrites the file.
   2. the project's buffers reload their environment;
   3. coil asks whether to run the cell again. A running kernel imports a
      newly installed package without a restart.
+- **The lookup** (`pixi search`, which says whether conda-forge has the
+  package) runs in the background, and the question comes when it is
+  done, so Emacs is never held up. Packages found are remembered for the
+  Emacs session. Several offers are looked up at once and asked one at a
+  time.
 - **Before running:** `coil-python-add-missing-imports` offers each import
   the language server (ty) reports as unresolved.
 - **Import names:** `coil-python-packages` maps the ones whose package is
@@ -426,8 +431,6 @@ Tested by hand, on a pixi project with IPython 9 and ipykernel 7:
 - **A code action for ty's diagnostic.** There is the command
   `coil-python-add-missing-imports` instead.
 - **Tests in the repository.** The checks above were run by hand.
-- **The conda-forge lookup is synchronous.** `pixi search`, before the
-  missing-import prompt, takes a second or two and Emacs waits for it.
 
 ### Open questions
 
