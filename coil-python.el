@@ -539,10 +539,15 @@ it all.  The breakpoints set (\\[coil-debug-toggle-breakpoint]) stop it too."
 \\{coil-python-mode-map}"
   :lighter nil
   :keymap coil-python-mode-map
-  ;; After the language server's: it speaks only if `coil-eldoc-in-source'.
+  ;; Eldoc after the language server's: it speaks only if
+  ;; `coil-eldoc-in-source'.  Completion before it, so as to add to its
+  ;; candidates (`coil-completion-in-source').
   (if coil-python-mode
-      (add-hook 'eldoc-documentation-functions #'coil-eldoc 90 t)
-    (remove-hook 'eldoc-documentation-functions #'coil-eldoc t)))
+      (progn
+        (add-hook 'eldoc-documentation-functions #'coil-eldoc 90 t)
+        (add-hook 'completion-at-point-functions #'coil-source-completion-at-point -50 t))
+    (remove-hook 'eldoc-documentation-functions #'coil-eldoc t)
+    (remove-hook 'completion-at-point-functions #'coil-source-completion-at-point t)))
 
 (provide 'coil-python)
 ;;; coil-python.el ends here

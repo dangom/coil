@@ -1033,24 +1033,71 @@ Typing stops the wait at once, whatever this says."
 Typing comes first: the wait ends at the first key pressed, and while an
 answer is still being worked out (a library's first, by jedi, can take
 seconds) no other question is put behind it -- the keys are not held up."
+  (coil--complete-wait session (coil--complete-send session code pos)
+                       (+ (float-time) coil-completion-timeout)))
+
+(defun coil--complete-send (session code pos)
+  "Ask SESSION's kernel for the completions of CODE at POS, without waiting.
+Return a cell whose car becomes the reply, for `coil--complete-wait'; or
+nil, if an earlier question is still being worked out."
   (unless (and (coil-session-completing session)
                ;; One never answered (the kernel died, say) is let go.
                (< (- (float-time) (coil-session-completing session)) 10))
-    (let* ((reply 'waiting)
-           (id (coil--send session "complete" :code code :pos pos))
-           (until (+ (float-time) coil-completion-timeout)))
+    (let ((cell (list 'waiting))
+          (id (coil--send session "complete" :code code :pos pos)))
       (setf (coil-session-completing session) (float-time))
       (puthash id (lambda (content)
                     (setf (coil-session-completing session) nil)
-                    (setq reply content))
+                    (setcar cell content))
                (coil-session-requests session))
-      (while (and (eq reply 'waiting)
-                  (< (float-time) until)
-                  (not (input-pending-p))
-                  (process-live-p (coil-session-process session)))
-        (accept-process-output (coil-session-process session) 0.01))
+      cell)))
+
+(defun coil--complete-wait (session cell until)
+  "The reply in CELL, from `coil--complete-send', waited for until UNTIL.
+The wait ends at the first key pressed.  nil if no reply came, or not ok."
+  (when cell
+    (while (and (eq (car cell) 'waiting)
+                (< (float-time) until)
+                (not (input-pending-p))
+                (process-live-p (coil-session-process session)))
+      (accept-process-output (coil-session-process session) 0.01))
+    (let ((reply (car cell)))
       (when (and (listp reply) (equal (alist-get 'status reply) "ok"))
         reply))))
+
+(defun coil--completions (reply)
+  "REPLY's matches, each with its type (IPython's) as property `coil-live'.
+The property is t when the kernel gives no type."
+  (let ((types (make-hash-table :test #'equal)))
+    (dolist (item (alist-get '_jupyter_types_experimental (alist-get 'metadata reply)))
+      (puthash (alist-get 'text item) (alist-get 'type item) types))
+    (mapcar (lambda (match)
+              (propertize match 'coil-live (or (gethash match types) t)))
+            (alist-get 'matches reply))))
+
+(defun coil--completion-type (candidate)
+  "The type the kernel gave CANDIDATE, as a string, or nil."
+  (let ((type (get-text-property 0 'coil-live candidate)))
+    (and (stringp type) (not (member type '("" "<unknown>"))) type)))
+
+(defun coil--completion-annotation (candidate)
+  "CANDIDATE's annotation: its type."
+  (when-let* ((type (coil--completion-type candidate)))
+    (concat " " type)))
+
+(defun coil--completion-kind (candidate)
+  "CANDIDATE's kind, for `:company-kind' (corfu's and company's icons)."
+  (pcase (coil--completion-type candidate)
+    ((or "instance" "statement") 'variable)
+    ("function" 'function)
+    ("class" 'class)
+    ("module" 'module)
+    ("keyword" 'keyword)
+    ("path" 'file)
+    ("param" 'variable)
+    ("property" 'property)
+    ("magic" 'magic)
+    ("dict key" 'value)))
 
 (defun coil-completion-at-point ()
   "Completion from the live session, for `completion-at-point-functions'.
@@ -1061,11 +1108,163 @@ In the session buffer, of the input; elsewhere, of the line at point."
            (base (if input-p coil--input-start (line-beginning-position)))
            (code (buffer-substring-no-properties base (if input-p (point-max) (line-end-position))))
            (reply (coil--complete-at session code (- (point) base))))
-      (when-let* ((matches (alist-get 'matches reply)))
+      (when-let* ((matches (coil--completions reply)))
         (list (+ base (alist-get 'cursor_start reply))
               (+ base (alist-get 'cursor_end reply))
               matches
+              :annotation-function #'coil--completion-annotation
+              :company-kind #'coil--completion-kind
               :exclusive 'no)))))
+
+;;;; In source buffers, with the buffer's own
+
+(defcustom coil-completion-in-source t
+  "Whether completion in source buffers adds the live session's candidates.
+The buffer's own completion (the language server's) answers first and keeps
+its order, docs and snippets; the session adds what it lacks and only the
+running code knows: a data frame's columns, a dictionary's keys, attributes
+made at run time.  See `coil-source-completion-at-point'."
+  :type 'boolean)
+
+(defcustom coil-completion-in-source-wait 0.03
+  "The longest completion in source buffers waits for the kernel, in seconds.
+Counted from the question, which goes out before the language server's: a
+warm kernel answers in a few milliseconds, so in practice it adds nothing.
+A later answer (jedi's first look at a library) joins at the next key."
+  :type 'number)
+
+(defun coil--other-completion ()
+  "The first answer of the other `completion-at-point-functions', or nil."
+  (let (answer)
+    (run-hook-wrapped 'completion-at-point-functions
+                      (lambda (fun)
+                        (unless (eq fun #'coil-source-completion-at-point)
+                          (setq answer (funcall fun)))))
+    answer))
+
+(defun coil--rebase (match from to beg end)
+  "MATCH, a completion of the text from FROM to TO, as one of BEG to END.
+nil if it cannot be: if it does not keep the text it would no longer cover."
+  (let ((head (if (< from beg) (buffer-substring-no-properties from beg) ""))
+        (tail (if (> to end) (buffer-substring-no-properties end to) "")))
+    (when (and (string-prefix-p head match) (string-suffix-p tail match)
+               (<= (length head) (- (length match) (length tail))))
+      (let ((core (substring match (length head) (- (length match) (length tail)))))
+        (propertize (concat (and (> from beg) (buffer-substring-no-properties beg from))
+                            core
+                            (and (< to end) (buffer-substring-no-properties to end)))
+                    'coil-live (get-text-property 0 'coil-live match))))))
+
+(defconst coil--candidate-properties
+  `((:annotation-function . coil--completion-annotation)
+    (:company-kind . coil--completion-kind)
+    (:company-doc-buffer)
+    (:company-docsig)
+    (:company-location)
+    (:company-deprecated)
+    (:exit-function))
+  "The properties of a completion answer that are functions of a candidate,
+with what to do for the session's own candidates (nil: nothing).")
+
+(defun coil--merge-completion (session answer)
+  "ANSWER, from another completion function, with SESSION's candidates added.
+ANSWER is (BEG END TABLE . PROPS).  The kernel is asked as soon as the
+candidates are first wanted, and answers (in a millisecond or two) while the
+other table computes its own; it is waited for no more than
+`coil-completion-in-source-wait' after the question, and an answer that
+comes later joins at the next key.  Its candidates are rebased on BEG and
+END, and those the other has already are dropped."
+  (pcase-let* ((`(,beg ,end ,table . ,props) answer)
+               (base (line-beginning-position))
+               (code (buffer-substring-no-properties base (line-end-position)))
+               (pos (- (point) base))
+               (buffer (current-buffer))
+               (own 'unknown) (live 'unknown) (cell nil) (until nil))
+    (cl-labels
+        ((live-p (candidate) (get-text-property 0 'coil-live candidate))
+         (live ()
+           ;; The session's candidates, those the other lacks.
+           (when (eq own 'unknown)
+             (setq cell (coil--complete-send session code pos)
+                   until (+ (float-time) coil-completion-in-source-wait)
+                   own (all-completions "" table)))
+           (when (eq live 'unknown)
+             (let ((reply (coil--complete-wait session cell until)))
+               ;; Not in yet (a library's first, by jedi): asked again at the
+               ;; next key, it may be.  The popup is not held up for it.
+               (when (or (null cell) reply (not (eq (car cell) 'waiting))
+                         (not (process-live-p (coil-session-process session))))
+                 (setq live
+                       (let ((seen (make-hash-table :test #'equal)))
+                         (dolist (c own) (puthash c t seen))
+                         (with-current-buffer buffer
+                           (cl-loop
+                            with from = (and reply (+ base (alist-get 'cursor_start reply)))
+                            with to = (and reply (+ base (alist-get 'cursor_end reply)))
+                            for match in (coil--completions reply)
+                            for c = (coil--rebase match from to beg end)
+                            when (and c (not (gethash c seen)))
+                            do (puthash c t seen) and collect c)))))))
+           (if (eq live 'unknown) nil live))
+         (sorter (sort)
+           (and sort
+                (lambda (candidates)
+                  (let (others lives)
+                    (dolist (c candidates)
+                      (if (live-p c) (push c lives) (push c others)))
+                    (append (funcall sort (nreverse others)) (nreverse lives))))))
+         (merged (string pred action)
+           ;; The other's candidates are matched as the other matches them
+           ;; (eglot's, by its own style); the session's, by prefix.
+           (pcase action
+             ('metadata
+              (let ((meta (cdr-safe (completion-metadata string table pred))))
+                `(metadata
+                  (display-sort-function . ,(sorter (alist-get 'display-sort-function meta)))
+                  (cycle-sort-function . ,(sorter (alist-get 'cycle-sort-function meta)))
+                  ,@(cl-remove-if (lambda (entry)
+                                    (memq (car-safe entry)
+                                          '(display-sort-function cycle-sort-function)))
+                                  meta))))
+             (`(boundaries . ,_) (funcall table string pred action))
+             ('t (let ((lives (live)))
+                   (append (all-completions string table pred)
+                           (all-completions string lives pred))))
+             (_ (let ((lives (live)))
+                  (complete-with-action action (append (all-completions "" table) lives)
+                                        string pred))))))
+      (setq props (copy-sequence props))
+      (pcase-dolist (`(,key . ,ours) coil--candidate-properties)
+        (let ((theirs (plist-get props key)))
+          (when (or theirs ours)
+            (setq props (plist-put props key
+                                   (lambda (candidate &rest args)
+                                     (if (live-p candidate)
+                                         (and ours (apply ours candidate args))
+                                       (and theirs (apply theirs candidate args)))))))))
+      (when-let* ((affix (plist-get props :affixation-function)))
+        (setq props (plist-put props :affixation-function
+                               (lambda (candidates)
+                                 (mapcar (lambda (c)
+                                           (if (live-p c)
+                                               (list c "" (or (coil--completion-annotation c) ""))
+                                             (car (funcall affix (list c)))))
+                                         candidates)))))
+      `(,beg ,end ,#'merged ,@props))))
+
+(defun coil-source-completion-at-point ()
+  "Completion in a source buffer: the buffer's own, with the session's added.
+For `completion-at-point-functions', ahead of the language server's: it
+takes the first answer of the functions after it and adds the candidates of
+the live session that it lacks.  With none of theirs, the session's alone.
+Nothing is asked of the kernel unless the project's session is running."
+  (when-let* ((coil-completion-in-source)
+              (session (coil-current-session))
+              ((coil-session-ready session)))
+    (let ((answer (coil--other-completion)))
+      (cond ((null answer) (coil-completion-at-point))
+            ;; An old-style answer, a function, is left to them.
+            ((consp answer) (coil--merge-completion session answer))))))
 
 (defcustom coil-eldoc-in-source nil
   "Whether eldoc in source buffers also asks the live session.

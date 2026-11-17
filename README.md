@@ -55,6 +55,19 @@ These are python.el's keys, except `C-c C-c` and `C-c C-b`.
 | `C-c C-f`, `C-c C-d` | nothing; shows what the session knows of the name at point |
 | `C-c C-k` | nothing; interrupts (with `C-u`, restarts the kernel) |
 
+Completion there is the language server's (eglot's), with the live
+session's added: what only the running code knows, such as a data frame's
+columns (`df.al` → `alpha`), a dictionary's keys (`df['b` → `beta`), and
+attributes made at run time. The server's candidates keep their order,
+docs and snippets. The session's come after them, with their type as
+annotation and icon. The kernel is asked before the server and answers in
+a millisecond or two, so the popup is not held up: measured, 1 to 4 ms in
+all against eglot's 0.1 to 2 alone. When the kernel is slow (jedi's first
+look at a library), its candidates join at the next key rather than being
+waited for. `coil-completion-in-source` turns this off. It works with any
+completion function, not only eglot's, and with corfu or company, without
+cape.
+
 With `coil-eldoc-in-source`, eldoc there also asks the live session (after
 the language server), for what only it knows: a data frame's columns, a
 value's type.
@@ -396,9 +409,6 @@ Tested by hand, on a pixi project with IPython 9 and ipykernel 7:
 
 ### Not done yet
 
-- **Live completion in `.py` buffers.** `coil-completion-at-point` works
-  there, but it is not merged with eglot's: corfu shows one source at a
-  time. It needs `cape-capf-super` or similar.
 - **A code action for ty's diagnostic.** There is the command
   `coil-python-add-missing-imports` instead.
 - **Tests in the repository.** The checks above were run by hand.
