@@ -17,6 +17,56 @@ completion that behave like the rest of Emacs.
 [Status](#status) for what is tested and what is not done yet.*
 
 
+## Requirements
+
+coil needs Emacs and a kernel, and nothing else. Everything below
+"Optional" it uses when it is there, and goes without when it is not:
+no third-party Emacs package is required.
+
+**Required**
+- **Emacs 30.1** or later. Only Emacs's own libraries are used.
+- **ipykernel** in the environment the kernel runs in (the project's). It
+  brings `jupyter_client`, `pyzmq` and IPython, which coil's bridge uses
+  too. Without it, coil says so, and in a pixi project offers to add it
+  (see below). Tested with Python 3.12, IPython 9 and ipykernel 7.
+
+**Optional**
+
+| What | What it gives | Without it |
+|---|---|---|
+| ipykernel 7 or later | completion and docs while code runs (kernel subshells) | they wait for the running code to finish |
+| [pixi](https://pixi.sh) | the kernel in a `dev` environment; offers to add missing packages (at run time, as a code action, by command) | the kernel runs in the buffer's environment; no offers |
+| eglot, with a Python language server (ty, pyright, basedpyright) | the session's candidates joined to the server's completion; the add-package code action | the session's candidates where nothing else completes; the commands |
+| flymake with a language server's diagnostics | `coil-python-add-package` knows the import at point; `coil-python-add-missing-imports` | the command asks for the module |
+| direnv with [envrc](https://github.com/purcell/envrc) | the project's environment for the kernel, reloaded after an install | the environment Emacs has |
+| Doom Emacs | its project root | `project.el`'s, else the directory |
+
+Another completion source than eglot's (lsp-mode's, say) is left alone:
+coil adds nothing to its answers. `coil-completion-merge-with` lists the
+ones it joins.
+
+### What coil touches outside its own buffers
+
+- **In a buffer with `coil-python-mode`** (yours to turn on, per buffer):
+  its keys (python.el's REPL commands go to coil's session), a completion
+  function ahead of the others, an eldoc function (silent unless
+  `coil-eldoc-in-source`).
+- **Once eglot is loaded:**
+  - `jsonrpc-request` and `jsonrpc-async-request` are advised. A
+    `codeAction` answer from an eglot server, for a `coil-python-mode`
+    buffer in a pixi project, gets coil's action after the server's.
+    Every other request, and every other jsonrpc client, passes through
+    untouched.
+  - `eglot-execute` gets an `:around` method that runs coil's own action
+    and passes every other on.
+- **The debugger's arrow** is added to `overlay-arrow-variable-list`, as
+  gud's is.
+- **Processes:** the bridge, one per session; the kernel and its idle
+  watch, which outlive Emacs; `pixi`, when asked.
+- **Files:** coil's state directory. In the project, only what you accept:
+  `pixi add`, and pinned figures.
+
+
 ## Using it
 
 ```elisp
@@ -64,9 +114,10 @@ annotation and icon. The kernel is asked before the server and answers in
 a millisecond or two, so the popup is not held up: measured, 1 to 4 ms in
 all against eglot's 0.1 to 2 alone. When the kernel is slow (jedi's first
 look at a library), its candidates join at the next key rather than being
-waited for. `coil-completion-in-source` turns this off. It works with any
-completion function, not only eglot's, and with corfu or company, without
-cape.
+waited for. `coil-completion-in-source` turns this off. Only eglot's
+completion is joined (`coil-completion-merge-with`); another source is left
+as it is, and with none, the session's candidates are offered alone. It
+works with corfu or company, without cape.
 
 With `coil-eldoc-in-source`, eldoc there also asks the live session (after
 the language server), for what only it knows: a data frame's columns, a
@@ -312,8 +363,18 @@ card whose source is the script, and a re-run rewrites the file.
   done, so Emacs is never held up. Packages found are remembered for the
   Emacs session. Several offers are looked up at once and asked one at a
   time.
-- **Before running:** `coil-python-add-missing-imports` offers each import
-  the language server (ty) reports as unresolved.
+- **Before running, as a code action:** on an import the language server
+  cannot resolve, eglot's code actions (`M-x eglot-code-actions`, or its
+  ⚡ hint) include "Add the package for sklearn to the pixi project
+  (coil)". It makes the same offer. `coil-python-code-actions` turns it
+  off.
+- **Before running, by command:** `coil-python-add-package` (the import at
+  point, or one you name) and `coil-python-add-missing-imports` (every one
+  in the buffer).
+- **Which diagnostics:** those whose message says an import cannot be
+  resolved: ty's "Cannot resolve imported module `x`", pyright's `Import
+  "x" could not be resolved`. Matched by message, with case, not by rule
+  name, which servers rename. "Module `x` has no member `y`" is not one.
 - **Import names:** `coil-python-packages` maps the ones whose package is
   named otherwise (`sklearn` → `scikit-learn`, `cv2` → `opencv`, …).
 
@@ -430,14 +491,11 @@ Tested by hand, on a pixi project with IPython 9 and ipykernel 7:
   longer than the limit left alone, and the next session told why;
 - the conda-forge lookup in the background: offers asked one at a time, a
   misspelt name warned of and not offered from conda-forge;
+- the add-package code action, with ty 0.0.104 in eglot: listed after ty's
+  own action on an unresolved import, none on other lines, and run through
+  `eglot-execute`;
 - pinning to a canvacs canvas through the Doom config's
   `coil-pin-function`, and a re-run rewriting the pinned figure.
-
-### Not done yet
-
-- **A code action for ty's diagnostic.** There is the command
-  `coil-python-add-missing-imports` instead.
-
 
 ## Testing
 
@@ -448,8 +506,10 @@ make compile                            # byte-compiles, warnings as errors
 ```
 
 `test/coil-test.el` covers completion merged with another source (order,
-metadata, exit functions, a late kernel answer, dictionary keys), the
-idle-shutdown note, and the queue of missing-package offers.
+metadata, exit functions, a late kernel answer, dictionary keys, stepping
+aside for a source not listed), the idle-shutdown note, which diagnostics
+mean a missing package, the code action (built, run, and kept from
+non-eglot connections), and the queue of missing-package offers.
 `test/test_bridge.py` runs a real kernel: completion of live objects, and
 the idle watch with a limit of 8 s (`COIL_TEST_IDLE`), attached, detached,
 during a run longer than the limit, and turned off. It takes about a minute,

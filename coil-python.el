@@ -35,6 +35,11 @@
 (declare-function envrc-mode "envrc" (&optional arg))
 (declare-function flymake-diagnostics "flymake" (&optional beg end))
 (declare-function flymake-diagnostic-text "flymake" (diag))
+(declare-function flymake-diagnostic-data "flymake" (diag))
+(declare-function flymake-diagnostic-beg "flymake" (diag))
+(declare-function flymake-diagnostic-end "flymake" (diag))
+(declare-function object-of-class-p "eieio" (obj class))
+(defvar coil-python-mode)
 
 (defgroup coil-python nil
   "Python in coil."
@@ -356,19 +361,132 @@ question comes when the answer is in, after any asked before it."
 
 (add-hook 'coil-cell-done-functions #'coil-python--offer-after-error)
 
+;;;; Unresolved imports, as the language server reports them
+
+(defconst coil-python--unresolved-messages
+  '("Cannot resolve imported module `\\([[:alnum:]_.]+\\)`"    ; ty
+    "Import \"\\([[:alnum:]_.]+\\)\" could not be resolved"    ; pyright, basedpyright
+    "No module named '\\([[:alnum:]_.]+\\)'")                  ; at run time
+  "Messages that mean an import is not installed; group 1, the module.
+The message decides, not the rule's name, which servers rename (ty's was
+unresolved-import, is import-not-found).  Matched with case: \"Module `x`
+has no member\" is another thing.")
+
+(defun coil-python--unresolved-module (message)
+  "The module a diagnostic's MESSAGE says is not installed, or nil."
+  (when (stringp message)
+    (let ((case-fold-search nil))
+      (cl-loop for regexp in coil-python--unresolved-messages
+               when (string-match regexp message)
+               return (match-string 1 message)))))
+
+(defun coil-python--diagnostic-module (diagnostic)
+  "The module flymake's DIAGNOSTIC says is not installed, or nil."
+  (let ((lsp (alist-get 'eglot-lsp-diag (flymake-diagnostic-data diagnostic))))
+    (coil-python--unresolved-module
+     (or (plist-get lsp :message) (flymake-diagnostic-text diagnostic)))))
+
+(defun coil-python-missing-import-at-point ()
+  "The import at point that is not installed: (MODULE BEG . END), or nil.
+From the diagnostics at point, else on this line.  For `embark' and the like."
+  (when (bound-and-true-p flymake-mode)
+    (cl-loop for diagnostic in (or (flymake-diagnostics (point))
+                                   (flymake-diagnostics (line-beginning-position)
+                                                        (line-end-position)))
+             for module = (coil-python--diagnostic-module diagnostic)
+             when module
+             return (cons module (cons (flymake-diagnostic-beg diagnostic)
+                                       (flymake-diagnostic-end diagnostic))))))
+
+(defun coil-python--root-or-lose ()
+  (or (coil-python--pixi-root default-directory)
+      (user-error "Not in a pixi project")))
+
+(defun coil-python-add-package (module)
+  "Offer to add the package for MODULE to the pixi project.
+Interactively, the import at point the language server cannot find, if any."
+  (interactive
+   (list (let ((at-point (car (coil-python-missing-import-at-point))))
+           (read-string (format-prompt "Add the package for module" at-point)
+                        nil nil at-point))))
+  (coil-python-offer-package module (coil-python--root-or-lose)))
+
 (defun coil-python-add-missing-imports ()
   "Offer to add each import of this buffer the language server cannot find."
   (interactive)
-  (let ((root (or (coil-python--pixi-root default-directory)
-                  (user-error "Not in a pixi project")))
+  (let ((root (coil-python--root-or-lose))
         modules)
-    (dolist (diagnostic (and (fboundp 'flymake-diagnostics) (flymake-diagnostics)))
-      (let ((text (flymake-diagnostic-text diagnostic)))
-        (when (string-match "\\(?:module\\|import\\) [`'\"]\\([[:alnum:]_.]+\\)[`'\"]" text)
-          (cl-pushnew (match-string 1 text) modules :test #'equal))))
+    (dolist (diagnostic (and (bound-and-true-p flymake-mode) (flymake-diagnostics)))
+      (when-let* ((module (coil-python--diagnostic-module diagnostic)))
+        (cl-pushnew module modules :test #'equal)))
     (unless modules (user-error "No unresolved imports here"))
     (dolist (module (nreverse modules))
       (coil-python-offer-package module root))))
+
+;;;; As eglot's code actions
+
+(defcustom coil-python-code-actions t
+  "Whether eglot's code actions offer to add the package of an unresolved import.
+The action runs `coil-python-offer-package': it asks before installing."
+  :type 'boolean)
+
+(defun coil-python--code-actions (params)
+  "coil's code actions for the LSP codeAction request PARAMS, as a list."
+  (when (and coil-python-code-actions coil-python-mode
+             (coil-python--pixi-root default-directory))
+    (let (seen actions)
+      (mapc (lambda (diagnostic)
+              (when-let* ((module (coil-python--unresolved-module
+                                   (plist-get diagnostic :message)))
+                          ((not (member module seen))))
+                (push module seen)
+                (let ((title (format "Add the package for %s to the pixi project (coil)"
+                                     module)))
+                  (push (list :title title :kind "quickfix"
+                              :diagnostics (vector diagnostic)
+                              :command (list :title title :command "coil.addPackage"
+                                             :arguments (vector module)))
+                        actions))))
+            (plist-get (plist-get params :context) :diagnostics))
+      (nreverse actions))))
+
+(defun coil-python--code-action-module (action)
+  "The module of ACTION, if it is coil's: a CodeAction or its Command."
+  (let* ((command (plist-get action :command))
+         (command (if (consp command) command action)))
+    (and (equal (plist-get command :command) "coil.addPackage")
+         (let ((arguments (plist-get command :arguments)))
+           (and (> (length arguments) 0) (elt arguments 0))))))
+
+;; The server's answer to a codeAction request gets coil's actions after
+;; its own; asked for in the buffer, before the request goes out.
+(defun coil-python--around-request (request connection method params &rest args)
+  (let ((ours (and (eq method :textDocument/codeAction)
+                   (object-of-class-p connection 'eglot-lsp-server)
+                   (coil-python--code-actions params))))
+    (if (not ours)
+        (apply request connection method params args)
+      (vconcat (apply request connection method params args) ours))))
+
+(defun coil-python--around-async-request (request connection method params &rest args)
+  (let ((ours (and (eq method :textDocument/codeAction)
+                   (object-of-class-p connection 'eglot-lsp-server)
+                   (coil-python--code-actions params)))
+        (success (plist-get args :success-fn)))
+    (when (and ours success)
+      (setq args (plist-put (copy-sequence args) :success-fn
+                            (lambda (result) (funcall success (vconcat result ours))))))
+    (apply request connection method params args)))
+
+(with-eval-after-load 'eglot
+  ;; Eglot has no place for a client's own code actions: its requests are
+  ;; joined, those of its servers only.  Without eglot, nothing is touched.
+  (advice-add 'jsonrpc-request :around #'coil-python--around-request)
+  (advice-add 'jsonrpc-async-request :around #'coil-python--around-async-request)
+  (cl-defmethod eglot-execute :around (server action)
+    (if-let* ((module (coil-python--code-action-module action)))
+        (coil-python-offer-package module (coil-python--root-or-lose))
+      (cl-call-next-method server action))))
 
 
 ;;; Sending code

@@ -4,7 +4,7 @@
 
 ;; Author: Daniel Gomez
 ;; Version: 0.1
-;; Package-Requires: ((emacs "29.1"))
+;; Package-Requires: ((emacs "30.1"))
 ;; Keywords: languages, processes
 ;; URL: https://github.com/dangom/coil
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -1159,13 +1159,21 @@ warm kernel answers in a few milliseconds, so in practice it adds nothing.
 A later answer (jedi's first look at a library) joins at the next key."
   :type 'number)
 
+(defcustom coil-completion-merge-with '(eglot-completion-at-point)
+  "The completion functions whose answers the session's candidates join.
+Another that answers first is left alone: the session adds nothing to it.
+With none answering, the session's candidates are offered alone."
+  :type '(repeat function))
+
 (defun coil--other-completion ()
-  "The first answer of the other `completion-at-point-functions', or nil."
+  "The first answer of the other `completion-at-point-functions', or nil.
+As (FUNCTION . ANSWER)."
   (let (answer)
     (run-hook-wrapped 'completion-at-point-functions
                       (lambda (fun)
                         (unless (eq fun #'coil-source-completion-at-point)
-                          (setq answer (funcall fun)))))
+                          (when-let* ((value (funcall fun)))
+                            (setq answer (cons fun value))))))
     answer))
 
 (defun coil--rebase (match from to beg end)
@@ -1281,16 +1289,20 @@ END, and those the other has already are dropped."
 (defun coil-source-completion-at-point ()
   "Completion in a source buffer: the buffer's own, with the session's added.
 For `completion-at-point-functions', ahead of the language server's: it
-takes the first answer of the functions after it and adds the candidates of
-the live session that it lacks.  With none of theirs, the session's alone.
-Nothing is asked of the kernel unless the project's session is running."
+takes the first answer of the functions after it and, if it is of one of
+`coil-completion-merge-with' (eglot's), adds the candidates of the live
+session that it lacks.  Any other answer is left as it is; with none, the
+session's alone.  Nothing is asked of the kernel unless the project's
+session is running."
   (when-let* ((coil-completion-in-source)
               (session (coil-current-session))
               ((coil-session-ready session)))
-    (let ((answer (coil--other-completion)))
-      (cond ((null answer) (coil-completion-at-point))
-            ;; An old-style answer, a function, is left to them.
-            ((consp answer) (coil--merge-completion session answer))))))
+    (pcase (coil--other-completion)
+      ('nil (coil-completion-at-point))
+      ;; Joined only where known to work; any other answer is theirs alone.
+      ((and `(,fun . ,answer)
+            (guard (and (consp answer) (memq fun coil-completion-merge-with))))
+       (coil--merge-completion session answer)))))
 
 (defcustom coil-eldoc-in-source nil
   "Whether eldoc in source buffers also asks the live session.

@@ -14,6 +14,7 @@
 (require 'ert)
 (require 'coil)
 (require 'coil-python)
+(require 'flymake)
 
 ;;;; Completion in source buffers, merged with another's
 
@@ -41,6 +42,7 @@
   `(with-temp-buffer
      (insert ,text)
      (setq coil-test--reply ,reply coil-test--exited nil)
+     (setq-local coil-completion-merge-with '(coil-test--other-capf))
      (setq-local completion-at-point-functions
                  (list #'coil-source-completion-at-point #'coil-test--other-capf))
      (cl-letf (((symbol-function 'coil-current-session)
@@ -129,6 +131,15 @@
     (cl-letf (((symbol-function 'coil-current-session) #'ignore))
       (should-not (coil-source-completion-at-point)))))
 
+(ert-deftest coil-merged-steps-aside-for-others ()
+  ;; A source not in `coil-completion-merge-with' (lsp-mode's, say) is
+  ;; left alone: coil answers nothing, and it answers as it would.
+  (coil-test--with-kernel "df.co" coil-test--df-reply
+    (setq-local coil-completion-merge-with '(eglot-completion-at-point))
+    (should-not (coil-source-completion-at-point))
+    (completion-at-point)
+    (should (member (buffer-string) '("df.copy" "df.corr" "df.co")))))
+
 (ert-deftest coil-merged-off ()
   (coil-test--with-kernel "df.co" coil-test--df-reply
     (let ((coil-completion-in-source nil))
@@ -156,6 +167,88 @@
              (coil--ended-text "The kernel" `((idle . 172800) (at . ,(float-time at))))))
     (should (string-match-p "for 1.5 h"
                             (coil--ended-text "The kernel" '((idle . 5400) (at . 0)))))))
+
+;;;; Unresolved imports, and eglot's code actions
+
+(ert-deftest coil-python-unresolved-module ()
+  (should (equal (coil-python--unresolved-module
+                  "Cannot resolve imported module `sklearn`\ninfo: ...") "sklearn"))
+  (should (equal (coil-python--unresolved-module
+                  "Import \"yaml\" could not be resolved from source") "yaml"))
+  (should (equal (coil-python--unresolved-module "No module named 'cv2.aruco'") "cv2.aruco"))
+  ;; Not a missing package: a missing member, and a case that is not ty's.
+  (should-not (coil-python--unresolved-module "Module `pandas` has no member `nope`"))
+  (should-not (coil-python--unresolved-module "cannot resolve imported module `x`"))
+  (should-not (coil-python--unresolved-module nil)))
+
+(defconst coil-test--action-params
+  '(:context (:diagnostics
+              [(:code "import-not-found" :message "Cannot resolve imported module `sklearn`")
+               (:code "import-not-found" :message "Cannot resolve imported module `sklearn`")
+               (:code "missing-attribute" :message "Module `os.path` has no member `nope`")])))
+
+(defmacro coil-test--in-pixi-project (&rest body)
+  `(with-temp-buffer
+     (setq-local coil-python-mode t)
+     (cl-letf (((symbol-function 'coil-python--pixi-root) (lambda (_) "/project/")))
+       ,@body)))
+
+(ert-deftest coil-python-code-actions ()
+  (coil-test--in-pixi-project
+   (let ((actions (coil-python--code-actions coil-test--action-params)))
+     (should (= (length actions) 1))     ; once per module
+     (should (equal (coil-python--code-action-module (car actions)) "sklearn"))
+     ;; As a Command too, as some clients pass it on.
+     (should (equal (coil-python--code-action-module (plist-get (car actions) :command))
+                    "sklearn"))
+     (should-not (coil-python--code-action-module '(:title "x" :command "other"))))
+   (let ((coil-python-code-actions nil))
+     (should-not (coil-python--code-actions coil-test--action-params))))
+  ;; Not in a pixi project, or the mode off: none.
+  (with-temp-buffer
+    (setq-local coil-python-mode t)
+    (cl-letf (((symbol-function 'coil-python--pixi-root) #'ignore))
+      (should-not (coil-python--code-actions coil-test--action-params)))))
+
+(ert-deftest coil-python-code-actions-only-for-eglot ()
+  (coil-test--in-pixi-project
+   (let ((request (lambda (&rest _) [(:title "theirs")])))
+     ;; Another jsonrpc client (dape, say): its answer is untouched.
+     (cl-letf (((symbol-function 'object-of-class-p) #'ignore))
+       (should (equal (coil-python--around-request
+                       request 'conn :textDocument/codeAction coil-test--action-params)
+                      [(:title "theirs")])))
+     (cl-letf (((symbol-function 'object-of-class-p) (lambda (&rest _) t)))
+       ;; Eglot's: coil's action after the server's.
+       (let ((actions (coil-python--around-request
+                       request 'conn :textDocument/codeAction coil-test--action-params)))
+         (should (= (length actions) 2))
+         (should (equal (plist-get (aref actions 0) :title) "theirs")))
+       ;; Any other request: untouched.
+       (should (equal (coil-python--around-request request 'conn :textDocument/hover nil)
+                      [(:title "theirs")]))
+       ;; Asynchronous, as eglot's suggestions are asked.
+       (let (got)
+         (coil-python--around-async-request
+          (lambda (_c _m _p &rest args) (funcall (plist-get args :success-fn) []))
+          'conn :textDocument/codeAction coil-test--action-params
+          :success-fn (lambda (r) (setq got r)))
+         (should (= (length got) 1)))))))
+
+(ert-deftest coil-python-missing-import-at-point ()
+  (with-temp-buffer
+    (insert "import os\nimport sklearn\n")
+    (let ((diagnostic (flymake-make-diagnostic
+                       (current-buffer) 18 25 :error
+                       "ty [import-not-found]: Cannot resolve imported module `sklearn`")))
+      (setq-local flymake-mode t)
+      (cl-letf (((symbol-function 'flymake-diagnostics)
+                 (lambda (&optional beg end)
+                   (and (<= beg 25) (>= (or end beg) 18) (list diagnostic)))))
+        (goto-char 12)                  ; on the line, not on the name
+        (should (equal (coil-python-missing-import-at-point) '("sklearn" 18 . 25)))
+        (goto-char 1)
+        (should-not (coil-python-missing-import-at-point))))))
 
 ;;;; Offers of missing packages
 
