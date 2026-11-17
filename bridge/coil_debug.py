@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Daniel Gomez
+
 """coil's breakpoints, in the kernel.
 
 Before a run that has breakpoints, Emacs has this file's text run silently,

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Daniel Gomez
+
 """coil's bridge: one Jupyter kernel, spoken to by Emacs in JSON lines.
 
 Emacs starts this as a plain subprocess, in the project's environment, and
